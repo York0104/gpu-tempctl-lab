@@ -36,6 +36,10 @@ def run_cmd(cmd):
     return res
 
 
+def _signal_to_keyboard_interrupt(signum, frame):
+    raise KeyboardInterrupt()
+
+
 def build_nvidia_smi_cmd(*args):
     base = ["nvidia-smi", *args]
     if os.geteuid() == 0:
@@ -93,6 +97,145 @@ def read_csv_rows(path: Path) -> list[dict]:
 def read_last_csv_row(path: Path):
     rows = read_csv_rows(path)
     return rows[-1] if rows else None
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _send_signal_to_pid(pid: int, sig: int) -> bool:
+    try:
+        os.kill(pid, sig)
+        return True
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        sig_flag = "-TERM" if sig == signal.SIGTERM else "-KILL"
+        res = subprocess.run(
+            ["sudo", "-n", "kill", sig_flag, str(pid)],
+            capture_output=True,
+            text=True,
+        )
+        return res.returncode == 0
+
+
+def terminate_pid(pid: int, timeout_s: float = 5.0) -> bool:
+    _send_signal_to_pid(pid, signal.SIGTERM)
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if not _pid_exists(pid):
+            return True
+        time.sleep(0.2)
+
+    _send_signal_to_pid(pid, signal.SIGKILL)
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if not _pid_exists(pid):
+            return True
+        time.sleep(0.2)
+    return not _pid_exists(pid)
+
+
+def find_workload_pids(workload_script: str) -> set[int]:
+    token = Path(workload_script).name
+    res = subprocess.run(
+        ["ps", "-eo", "pid=,args="],
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode != 0:
+        return set()
+
+    pids = set()
+    for line in res.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        args = parts[1]
+        if "python" not in args:
+            continue
+        if (
+            f"/{token}" not in args
+            and f" {token}" not in args
+            and not args.endswith(token)
+        ):
+            continue
+        pids.add(pid)
+    return pids
+
+
+def cleanup_orphan_workloads(workload_script: str, baseline_pids: set[int], meta: dict):
+    current = find_workload_pids(workload_script)
+    orphan_pids = sorted(current - baseline_pids)
+    if not orphan_pids:
+        return
+
+    cleaned = []
+    failed = []
+    for pid in orphan_pids:
+        if terminate_pid(pid):
+            cleaned.append(pid)
+        else:
+            failed.append(pid)
+
+    if cleaned:
+        meta["result"]["orphan_workload_pids_cleaned"] = cleaned
+        meta["result"]["notes"].append(f"cleaned orphan workload pids: {cleaned}")
+    if failed:
+        meta["result"]["orphan_workload_pids_failed"] = failed
+        meta["result"]["notes"].append(f"failed to clean orphan workload pids: {failed}")
+
+
+def restore_default_fan_policy(args, meta: dict):
+    script = str(Path(__file__).with_name("fan_fault_injector.py"))
+    cmd = [
+        sys.executable,
+        script,
+        "--gpu-index", str(args.gpu_index),
+        "--fan-index", str(args.fan_index),
+        "--restore-default",
+    ]
+    if os.geteuid() != 0:
+        cmd = ["sudo", "-n", "-E", *cmd]
+
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        meta["result"]["notes"].append(
+            "fan restore failed: "
+            f"code={res.returncode}, stderr={res.stderr.strip() or 'N/A'}"
+        )
+        return False
+    return True
+
+
+def restore_default_power_limit(args, meta: dict):
+    default_pl = meta.get("gpu", {}).get("default_pl_w")
+    if default_pl is None:
+        try:
+            default_pl = get_gpu_info(args.gpu_index)["default_pl_w"]
+        except Exception as e:
+            meta["result"]["notes"].append(f"cannot query default PL for cleanup: {e}")
+            return False
+
+    try:
+        set_power_limit(args.gpu_index, int(default_pl))
+        return True
+    except Exception as e:
+        meta["result"]["notes"].append(f"default PL restore failed: {e}")
+        return False
 
 
 def get_gpu_info(gpu_index: int):
@@ -195,6 +338,110 @@ def write_metadata(run_dir: Path, meta: dict):
     )
 
 
+def _to_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def generate_temperature_plot(run_dir: Path, meta: dict):
+    controller_csv = run_dir / "controller.csv"
+    thermal_csv = run_dir / "thermal.csv"
+
+    controller_rows = read_csv_rows(controller_csv)
+    thermal_rows = read_csv_rows(thermal_csv)
+    if not controller_rows and not thermal_rows:
+        return
+
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        meta["result"]["notes"].append(
+            "temperature plot skipped: matplotlib is not available"
+        )
+        return
+
+    traces = []
+
+    if controller_rows:
+        xs = []
+        ys = []
+        first_ts = None
+        for row in controller_rows:
+            y = _to_float(row.get("temp_c"))
+            if y is None:
+                continue
+            x = _to_float(row.get("elapsed_s"))
+            if x is None:
+                ts = _to_float(row.get("ts"))
+                if ts is None:
+                    continue
+                if first_ts is None:
+                    first_ts = ts
+                x = ts - first_ts
+            xs.append(x)
+            ys.append(y)
+        if xs and ys:
+            traces.append(("controller temp", xs, ys))
+
+    if thermal_rows:
+        xs = []
+        ys = []
+        first_ts = None
+        for idx, row in enumerate(thermal_rows):
+            y = _to_float(
+                row.get("temp_c")
+                or row.get("temperature_c")
+                or row.get("gpu_temp_c")
+            )
+            if y is None:
+                continue
+            ts = _to_float(row.get("ts"))
+            if ts is None:
+                x = float(idx)
+            else:
+                if first_ts is None:
+                    first_ts = ts
+                x = ts - first_ts
+            xs.append(x)
+            ys.append(y)
+        if xs and ys:
+            traces.append(("thermal temp", xs, ys))
+
+    if not traces:
+        return
+
+    try:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        for label, xs, ys in traces:
+            ax.plot(xs, ys, label=label, linewidth=2)
+
+        controller_effective = meta.get("effective", {}).get("controller", {})
+        target = _to_float(controller_effective.get("target"))
+        band_low = _to_float(controller_effective.get("band_low"))
+        band_high = _to_float(controller_effective.get("band_high"))
+        if target is not None:
+            ax.axhline(target, linestyle="--", linewidth=1, label=f"target {target:.0f}C")
+        if band_low is not None and band_high is not None:
+            ax.axhspan(band_low, band_high, alpha=0.12, label="target band")
+
+        ax.set_xlabel("Elapsed (s)")
+        ax.set_ylabel("Temperature (C)")
+        ax.set_title(f"{meta.get('scenario', 'scenario')} | {meta.get('result', {}).get('status', 'unknown')}")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+        out_path = run_dir / "temperature_curve.png"
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+
+        meta["artifacts"]["temperature_plot"] = str(out_path)
+    except Exception as e:
+        meta["result"]["notes"].append(f"temperature plot generation failed: {e}")
+
+
 def print_run_summary(run_dir: Path):
     meta_path = run_dir / "metadata.json"
     if not meta_path.exists():
@@ -243,6 +490,10 @@ def print_run_summary(run_dir: Path):
         print(f"final_temp_c           : {temp_val}", flush=True)
         print(f"final_power_limit_w    : {pl_val}", flush=True)
         print(f"final_fan_percent      : {fan_val}", flush=True)
+
+    temp_plot = meta.get("artifacts", {}).get("temperature_plot")
+    if temp_plot:
+        print(f"temperature_plot       : {temp_plot}", flush=True)
 
     print(f"run_dir  : {run_dir}", flush=True)
     print("==================================\n", flush=True)
@@ -404,6 +655,8 @@ def run_natural_high_heat(args, run_dir: Path, meta: dict):
                 stdout_fp.close()
             except Exception:
                 pass
+        if proc.poll() is None:
+            stop_proc(proc)
 
 
 def run_cooling_anomaly(args, run_dir: Path, meta: dict):
@@ -604,46 +857,57 @@ def ensure_sudo_for_runner():
 
 
 def main():
-    ensure_sudo_for_runner()
-    args = parse_args()
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    base_dir = Path(args.output_root)
-    if args.session_name:
-        base_dir = base_dir / args.session_name
-    run_dir = base_dir / f"{args.scenario}_{ts}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    meta = build_metadata_base(args, run_dir)
-    write_metadata(run_dir, meta)
-
-    print(f"Run directory: {run_dir}", flush=True)
-
+    orig_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _signal_to_keyboard_interrupt)
     try:
-        if args.scenario == "natural_high_heat":
-            run_natural_high_heat(args, run_dir, meta)
-        elif args.scenario == "cooling_anomaly":
-            run_cooling_anomaly(args, run_dir, meta)
-        else:
-            raise ValueError(f"unsupported scenario: {args.scenario}")
+        ensure_sudo_for_runner()
+        args = parse_args()
+        baseline_workload_pids = find_workload_pids(args.workload_script)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        base_dir = Path(args.output_root)
+        if args.session_name:
+            base_dir = base_dir / args.session_name
+        run_dir = base_dir / f"{args.scenario}_{ts}"
+        run_dir.mkdir(parents=True, exist_ok=True)
 
-        if meta["result"]["status"] == "running":
-            finalize_metadata(meta, status="success", return_code=0)
-        else:
-            finalize_metadata(
-                meta,
-                status=meta["result"]["status"],
-                return_code=meta["result"].get("return_code"),
-            )
-
-    except KeyboardInterrupt:
-        finalize_metadata(meta, status="aborted", return_code=None, notes=["Interrupted by user"])
-        raise
-    except Exception as e:
-        finalize_metadata(meta, status="failed", return_code=1, notes=[str(e)])
-        raise
-    finally:
+        meta = build_metadata_base(args, run_dir)
         write_metadata(run_dir, meta)
-        print_run_summary(run_dir)
+
+        print(f"Run directory: {run_dir}", flush=True)
+
+        try:
+            if args.scenario == "natural_high_heat":
+                run_natural_high_heat(args, run_dir, meta)
+            elif args.scenario == "cooling_anomaly":
+                run_cooling_anomaly(args, run_dir, meta)
+            else:
+                raise ValueError(f"unsupported scenario: {args.scenario}")
+
+            if meta["result"]["status"] == "running":
+                finalize_metadata(meta, status="success", return_code=0)
+            else:
+                finalize_metadata(
+                    meta,
+                    status=meta["result"]["status"],
+                    return_code=meta["result"].get("return_code"),
+                )
+
+        except KeyboardInterrupt:
+            finalize_metadata(meta, status="aborted", return_code=None, notes=["Interrupted by user"])
+            raise
+        except Exception as e:
+            finalize_metadata(meta, status="failed", return_code=1, notes=[str(e)])
+            raise
+        finally:
+            cleanup_orphan_workloads(args.workload_script, baseline_workload_pids, meta)
+            restore_default_power_limit(args, meta)
+            restore_default_fan_policy(args, meta)
+            write_metadata(run_dir, meta)
+            generate_temperature_plot(run_dir, meta)
+            write_metadata(run_dir, meta)
+            print_run_summary(run_dir)
+    finally:
+        signal.signal(signal.SIGTERM, orig_sigterm)
 
 
 if __name__ == "__main__":

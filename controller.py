@@ -77,6 +77,10 @@ def run_cmd(cmd):
         raise RuntimeError(f"Command failed: {' '.join(cmd)}\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
     return res
 
+
+def _signal_to_keyboard_interrupt(signum, frame):
+    raise KeyboardInterrupt()
+
 def set_power_limit(gpu_index, watts):
     if os.geteuid() == 0:
         cmd = ["nvidia-smi", "-i", str(gpu_index), "-pl", str(int(watts))]
@@ -246,6 +250,9 @@ def decide_80(temp_avg, current_pl, current_mode, min_pl, max_pl, low_count):
 # Main
 # ----------------------------
 def main():
+    orig_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, _signal_to_keyboard_interrupt)
+
     args = parse_args()
 
     profile = PROFILE_60 if args.target == 60 else PROFILE_80
@@ -411,6 +418,7 @@ def main():
         if csv_fp is not None:
             csv_fp.close()
         nvmlShutdown()
+        signal.signal(signal.SIGTERM, orig_sigterm)
 
 if __name__ == "__main__":
     main()
