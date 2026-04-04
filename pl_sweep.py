@@ -44,13 +44,21 @@ def parse_args():
     p.add_argument("--output-root", type=str, default="logs")
     return p.parse_args()
 
+def build_nvidia_smi_cmd(*args):
+    base = ["nvidia-smi", *args]
+    if os.geteuid() == 0:
+        return base
+    return ["sudo", "-n", *base]
+
 def set_power_limit(gpu_index: int, watts: int):
-    cmd = ["sudo", "-n", "nvidia-smi", "-i", str(gpu_index), "-pl", str(watts)]
+    cmd = build_nvidia_smi_cmd("-i", str(gpu_index), "-pl", str(watts))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(
-            f"set_power_limit failed for {watts}W\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\n"
-            f"Hint: run `sudo -v` first so sudo credential is cached."
+            f"set_power_limit failed for {watts}W\n"
+            f"STDOUT:\n{result.stdout}\n"
+            f"STDERR:\n{result.stderr}\n"
+            f"Hint: either run the whole script as root, or allow passwordless sudo for /usr/bin/nvidia-smi."
         )
 
 def sample_metrics(handle):

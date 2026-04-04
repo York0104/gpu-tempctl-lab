@@ -1,0 +1,21 @@
+{
+  "scenario": "natural_high_heat",
+  "gpu_index": 0,
+  "output_root": "logs/quick_smoke_20260404",
+  "session_name": null,
+  "controller_script": "controller.py",
+  "workload_script": "workload_torch.py",
+  "logger_script": "gpu_logger.py",
+  "target": 80,
+  "hold_seconds": 20,
+  "max_run_seconds": 180,
+  "workload_mode": "mid",
+  "power_limit": 200,
+  "run_seconds": 900,
+  "fault_start": 300,
+  "fault_seconds": 300,
+  "fault_fan_percent": 50,
+  "fan_index": 0,
+  "sample_interval": 1.0,
+  "safety_temp": 83.0
+}

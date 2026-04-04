@@ -1,0 +1,6 @@
+GPU: NVIDIA GeForce GTX 1080 Ti (GPU-fd68ea02-5910-abaa-e4af-73fffdd8c14d)
+PL range: 125~300W, default=250W
+Target mode: 80C
+Initial PL: 300W, workload mode: mid, size=6144
+Success: stayed within [75, 85] for 20 consecutive seconds.
+Restored default PL = 250W

@@ -78,8 +78,10 @@ def run_cmd(cmd):
     return res
 
 def set_power_limit(gpu_index, watts):
-    # 需要先 sudo -v
-    cmd = ["sudo", "-n", "nvidia-smi", "-i", str(gpu_index), "-pl", str(int(watts))]
+    if os.geteuid() == 0:
+        cmd = ["nvidia-smi", "-i", str(gpu_index), "-pl", str(int(watts))]
+    else:
+        cmd = ["sudo", "-n", "nvidia-smi", "-i", str(gpu_index), "-pl", str(int(watts))]
     run_cmd(cmd)
 
 def start_workload(workload_script, size, cwd):

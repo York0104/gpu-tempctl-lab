@@ -1,0 +1,9 @@
+ts,elapsed_s,target_c,phase,temp_c,temp_avg_3s,power_w,power_limit_w,gpu_util_percent,mem_util_percent,fan_percent,graphics_clock_mhz,mem_clock_mhz,controller_pl_w,controller_mode,decision_action,in_band_consecutive_s
+1775312973.7155042,0.0,80,warmup,40,40.0,12.56,300.0,4,2,0,139,405,300,mid,INIT,0
+1775312974.7191427,1.004,80,warmup,40,40.0,12.171,300.0,4,2,0,139,405,300,mid,INIT,0
+1775312975.7219834,2.007,80,warmup,53,44.333,288.78,300.0,100,47,0,1822,5005,300,mid,LOW_WAIT,0
+1775312976.7319484,3.017,80,warmup,54,49.0,287.697,300.0,100,46,0,1822,5005,300,high,MODE_HIGH,0
+1775312978.008894,4.294,80,warmup,45,50.667,77.49,300.0,0,0,0,1949,5508,300,high,LOW_WAIT,0
+1775312979.0133755,5.297,80,warmup,54,51.0,291.355,300.0,100,54,0,1835,5005,300,high,LOW_WAIT,0
+1775312980.0400257,6.325,80,warmup,55,51.333,293.568,300.0,100,53,0,1835,5005,300,high,LOW_WAIT,0
+1775312981.0569675,7.342,80,warmup,56,55.0,296.574,300.0,100,57,0,1835,5005,300,high,LOW_WAIT,0
