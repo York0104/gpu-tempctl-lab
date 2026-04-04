@@ -35,6 +35,7 @@ def run_cmd(cmd):
         )
     return res
 
+
 def build_nvidia_smi_cmd(*args):
     base = ["nvidia-smi", *args]
     if os.geteuid() == 0:
@@ -82,6 +83,182 @@ def tail_text_file(path: Path, n_lines: int = 80) -> str:
     return "".join(lines[-n_lines:])
 
 
+def read_csv_rows(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    with path.open("r", newline="", errors="replace") as f:
+        return list(csv.DictReader(f))
+
+
+def read_last_csv_row(path: Path):
+    rows = read_csv_rows(path)
+    return rows[-1] if rows else None
+
+
+def get_gpu_info(gpu_index: int):
+    from pynvml import (
+        nvmlInit,
+        nvmlShutdown,
+        nvmlDeviceGetHandleByIndex,
+        nvmlDeviceGetName,
+        nvmlDeviceGetUUID,
+        nvmlDeviceGetPowerManagementLimitConstraints,
+        nvmlDeviceGetPowerManagementDefaultLimit,
+    )
+
+    nvmlInit()
+    try:
+        handle = nvmlDeviceGetHandleByIndex(gpu_index)
+
+        name = nvmlDeviceGetName(handle)
+        if isinstance(name, bytes):
+            name = name.decode()
+
+        uuid = nvmlDeviceGetUUID(handle)
+        if isinstance(uuid, bytes):
+            uuid = uuid.decode()
+
+        min_pl_mw, max_pl_mw = nvmlDeviceGetPowerManagementLimitConstraints(handle)
+        default_pl_w = int(nvmlDeviceGetPowerManagementDefaultLimit(handle) / 1000)
+
+        return {
+            "gpu_index": gpu_index,
+            "name": name,
+            "uuid": uuid,
+            "pl_min_w": int(min_pl_mw / 1000),
+            "pl_max_w": int(max_pl_mw / 1000),
+            "default_pl_w": default_pl_w,
+        }
+    finally:
+        nvmlShutdown()
+
+
+def build_metadata_base(args, run_dir: Path):
+    import socket
+
+    gpu_info = get_gpu_info(args.gpu_index)
+
+    meta = {
+        "schema_version": "scenario_runner.v2",
+        "scenario": args.scenario,
+        "run_id": run_dir.name,
+        "timestamps": {
+            "start_ts": time.time(),
+            "end_ts": None,
+            "duration_s": None,
+        },
+        "host": {
+            "hostname": socket.gethostname(),
+            "cwd": str(Path.cwd()),
+            "python_executable": sys.executable,
+            "runner_euid": os.geteuid(),
+        },
+        "gpu": gpu_info,
+        "requested": {},
+        "effective": {},
+        "artifacts": {},
+        "result": {
+            "status": "running",
+            "return_code": None,
+            "success_condition": None,
+            "notes": [],
+        },
+    }
+
+    if args.scenario == "natural_high_heat":
+        meta["requested"] = {
+            "scenario": args.scenario,
+            "target": args.target,
+            "hold_seconds": args.hold_seconds,
+            "max_run_seconds": args.max_run_seconds,
+        }
+    elif args.scenario == "cooling_anomaly":
+        meta["requested"] = {
+            "scenario": args.scenario,
+            "workload_mode": args.workload_mode,
+            "power_limit": args.power_limit,
+            "run_seconds": args.run_seconds,
+            "fault_start": args.fault_start,
+            "fault_seconds": args.fault_seconds,
+            "fault_fan_percent": args.fault_fan_percent,
+            "fan_index": args.fan_index,
+            "sample_interval": args.sample_interval,
+            "safety_temp": args.safety_temp,
+        }
+
+    return meta
+
+
+def write_metadata(run_dir: Path, meta: dict):
+    (run_dir / "metadata.json").write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False)
+    )
+
+
+def print_run_summary(run_dir: Path):
+    meta_path = run_dir / "metadata.json"
+    if not meta_path.exists():
+        print(f"[summary] metadata.json not found: {meta_path}", flush=True)
+        return
+
+    meta = json.loads(meta_path.read_text())
+    scenario = meta.get("scenario", "unknown")
+    status = meta.get("result", {}).get("status", "unknown")
+
+    print("\n===== Scenario Result Summary =====", flush=True)
+    print(f"run_id   : {meta.get('run_id', run_dir.name)}", flush=True)
+    print(f"scenario : {scenario}", flush=True)
+    print(f"status   : {status}", flush=True)
+
+    if meta.get("timestamps"):
+        print(f"duration : {meta['timestamps'].get('duration_s')}", flush=True)
+
+    # natural_high_heat: controller.csv
+    controller_csv = run_dir / "controller.csv"
+    last_ctl = read_last_csv_row(controller_csv)
+    if last_ctl is not None:
+        print(f"final_temp_c           : {last_ctl.get('temp_c')}", flush=True)
+        print(f"final_temp_avg_3s      : {last_ctl.get('temp_avg_3s')}", flush=True)
+        print(f"final_controller_pl_w  : {last_ctl.get('controller_pl_w')}", flush=True)
+        print(f"final_controller_mode  : {last_ctl.get('controller_mode')}", flush=True)
+        print(f"final_in_band_seconds  : {last_ctl.get('in_band_consecutive_s')}", flush=True)
+
+    # cooling_anomaly: thermal.csv
+    thermal_csv = run_dir / "thermal.csv"
+    last_thermal = read_last_csv_row(thermal_csv)
+    if last_thermal is not None:
+        temp_val = (
+            last_thermal.get("temp_c")
+            or last_thermal.get("temperature_c")
+            or last_thermal.get("gpu_temp_c")
+        )
+        pl_val = (
+            last_thermal.get("power_limit_w")
+            or last_thermal.get("pl_w")
+        )
+        fan_val = (
+            last_thermal.get("fan_percent")
+            or last_thermal.get("fan_speed_percent")
+        )
+        print(f"final_temp_c           : {temp_val}", flush=True)
+        print(f"final_power_limit_w    : {pl_val}", flush=True)
+        print(f"final_fan_percent      : {fan_val}", flush=True)
+
+    print(f"run_dir  : {run_dir}", flush=True)
+    print("==================================\n", flush=True)
+
+
+def finalize_metadata(meta: dict, status: str, return_code: int | None = None, notes=None):
+    meta["timestamps"]["end_ts"] = time.time()
+    meta["timestamps"]["duration_s"] = round(
+        meta["timestamps"]["end_ts"] - meta["timestamps"]["start_ts"], 3
+    )
+    meta["result"]["status"] = status
+    meta["result"]["return_code"] = return_code
+    if notes:
+        meta["result"]["notes"].extend(notes)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Run predefined GPU thermal scenarios")
     p.add_argument("--scenario", choices=["natural_high_heat", "cooling_anomaly"], required=True)
@@ -112,13 +289,41 @@ def parse_args():
     return p.parse_args()
 
 
-def run_natural_high_heat(args, run_dir: Path):
+def run_natural_high_heat(args, run_dir: Path, meta: dict):
     out_csv = run_dir / "controller.csv"
     stdout_log = run_dir / "controller_stdout.log"
 
+    if args.target == 60:
+        controller_effective = {
+            "target": 60,
+            "band_low": 55,
+            "band_high": 65,
+            "stable_low": 58,
+            "stable_high": 62,
+            "pl_init_w": 150,
+            "workload_mode": "mid",
+        }
+    else:
+        controller_effective = {
+            "target": 80,
+            "band_low": 75,
+            "band_high": 85,
+            "stable_low": 78,
+            "stable_high": 82,
+            "pl_init_w": 300,
+            "workload_mode": "mid",
+        }
+
+    meta["effective"]["controller"] = controller_effective
+    meta["artifacts"]["controller_csv"] = str(out_csv)
+    meta["artifacts"]["controller_stdout_log"] = str(stdout_log)
+    meta["artifacts"]["command_json"] = str(run_dir / "command.json")
+    write_metadata(run_dir, meta)
+
     if os.geteuid() == 0:
         cmd = [
-            sys.executable, args.controller_script,
+            sys.executable,
+            args.controller_script,
             "--target", str(args.target),
             "--hold-seconds", str(args.hold_seconds),
             "--max-run-seconds", str(args.max_run_seconds),
@@ -153,8 +358,11 @@ def run_natural_high_heat(args, run_dir: Path):
                 if stdout_fp not in (None, subprocess.DEVNULL):
                     stdout_fp.flush()
                     stdout_fp.close()
+                    stdout_fp = None
 
                 if rc != 0:
+                    meta["result"]["return_code"] = rc
+                    meta["result"]["notes"].append(f"controller log: {stdout_log}")
                     log_tail = tail_text_file(stdout_log, 80)
                     raise RuntimeError(
                         f"natural_high_heat failed with code {rc}\n"
@@ -162,6 +370,28 @@ def run_natural_high_heat(args, run_dir: Path):
                         f"---- controller_stdout.log (tail) ----\n"
                         f"{log_tail}"
                     )
+
+                meta["result"]["success_condition"] = "in-band-hold"
+                meta["result"]["return_code"] = 0
+
+                last_row = read_last_csv_row(out_csv)
+                if last_row:
+                    try:
+                        meta["result"]["final_temp_c"] = float(last_row["temp_c"])
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                    try:
+                        meta["result"]["final_controller_pl_w"] = float(last_row["controller_pl_w"])
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                    if "controller_mode" in last_row:
+                        meta["result"]["final_controller_mode"] = last_row["controller_mode"]
+                    try:
+                        meta["result"]["final_in_band_consecutive_s"] = int(
+                            float(last_row["in_band_consecutive_s"])
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        pass
                 break
             time.sleep(1.0)
     except KeyboardInterrupt:
@@ -176,12 +406,30 @@ def run_natural_high_heat(args, run_dir: Path):
                 pass
 
 
-def run_cooling_anomaly(args, run_dir: Path):
+def run_cooling_anomaly(args, run_dir: Path, meta: dict):
     thermal_csv = run_dir / "thermal.csv"
     perf_csv = run_dir / "perf.csv"
     events_csv = run_dir / "events.csv"
     fault_flag_file = run_dir / "fault_active.flag"
     fault_flag_file.write_text("0")
+
+    meta["effective"]["fault_plan"] = {
+        "workload_mode": args.workload_mode,
+        "power_limit": args.power_limit,
+        "run_seconds": args.run_seconds,
+        "fault_start": args.fault_start,
+        "fault_seconds": args.fault_seconds,
+        "fault_fan_percent": args.fault_fan_percent,
+        "fan_index": args.fan_index,
+        "safety_temp": args.safety_temp,
+    }
+    meta["artifacts"]["thermal_csv"] = str(thermal_csv)
+    meta["artifacts"]["perf_csv"] = str(perf_csv)
+    meta["artifacts"]["events_csv"] = str(events_csv)
+    meta["artifacts"]["fault_flag_file"] = str(fault_flag_file)
+    meta["artifacts"]["workload_stdout_log"] = str(run_dir / "workload_stdout.log")
+    meta["artifacts"]["logger_stdout_log"] = str(run_dir / "logger_stdout.log")
+    write_metadata(run_dir, meta)
 
     nvmlInit()
     handle = nvmlDeviceGetHandleByIndex(args.gpu_index)
@@ -236,6 +484,8 @@ def run_cooling_anomaly(args, run_dir: Path):
             f.flush()
 
             fault_active = False
+            fault_injected_once = False
+            fault_restored_once = False
             fault_end = args.fault_start + args.fault_seconds
 
             while True:
@@ -254,14 +504,16 @@ def run_cooling_anomaly(args, run_dir: Path):
                         restore_default_fan(args.gpu_index, args.fan_index)
                         fault_flag_file.write_text("0")
                         fault_active = False
+                        fault_restored_once = True
                         write_event(writer, start_ts, "fault_auto_restored_by_safety", temp)
                     write_event(writer, start_ts, "safety_temp_hit", temp)
                     break
 
-                if (not fault_active) and elapsed >= args.fault_start:
+                if (not fault_injected_once) and elapsed >= args.fault_start:
                     set_manual_fan_percent(args.gpu_index, args.fan_index, args.fault_fan_percent)
                     fault_flag_file.write_text("1")
                     fault_active = True
+                    fault_injected_once = True
                     write_event(writer, start_ts, "fault_start", args.fault_fan_percent)
                     f.flush()
 
@@ -269,6 +521,7 @@ def run_cooling_anomaly(args, run_dir: Path):
                     restore_default_fan(args.gpu_index, args.fan_index)
                     fault_flag_file.write_text("0")
                     fault_active = False
+                    fault_restored_once = True
                     write_event(writer, start_ts, "fault_end_restore_auto", temp)
                     f.flush()
 
@@ -307,8 +560,44 @@ def run_cooling_anomaly(args, run_dir: Path):
 
         fan_nvml_shutdown()
 
+    event_rows = read_csv_rows(events_csv)
+    event_names = {row.get("event") for row in event_rows}
+
+    fault_started = "fault_start" in event_names
+    fault_restored = (
+        "fault_end_restore_auto" in event_names
+        or "fault_auto_restored_by_safety" in event_names
+    )
+    safety_stop = "safety_temp_hit" in event_names
+
+    meta["result"]["fault_started"] = fault_started
+    meta["result"]["fault_restored"] = fault_restored
+    meta["result"]["safety_stop"] = safety_stop
+    meta["result"]["return_code"] = 0
+
+    if safety_stop:
+        meta["result"]["status"] = "safety_stop"
+        meta["result"]["success_condition"] = "stopped_by_safety_temp"
+    elif fault_started and fault_restored:
+        meta["result"]["success_condition"] = "fault_injected_and_restored"
+    elif fault_started and not fault_restored:
+        meta["result"]["success_condition"] = "fault_injected_not_restored"
+        meta["result"]["notes"].append("fault started but no restore event found")
+    else:
+        meta["result"]["success_condition"] = "scenario_completed_without_fault"
+        meta["result"]["notes"].append("fault_start event not found")
+
+    last_thermal = read_last_csv_row(thermal_csv)
+    if last_thermal:
+        try:
+            meta["result"]["final_temp_c"] = float(last_thermal["temp_c"])
+        except (KeyError, TypeError, ValueError):
+            pass
+
 
 def ensure_sudo_for_runner():
+    if os.geteuid() == 0:
+        return
     res = subprocess.run(["sudo", "-v"])
     if res.returncode != 0:
         raise RuntimeError("sudo credential initialization failed")
@@ -324,18 +613,37 @@ def main():
     run_dir = base_dir / f"{args.scenario}_{ts}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    (run_dir / "metadata.json").write_text(
-        json.dumps(vars(args), indent=2, ensure_ascii=False)
-    )
+    meta = build_metadata_base(args, run_dir)
+    write_metadata(run_dir, meta)
 
     print(f"Run directory: {run_dir}", flush=True)
 
-    if args.scenario == "natural_high_heat":
-        run_natural_high_heat(args, run_dir)
-    elif args.scenario == "cooling_anomaly":
-        run_cooling_anomaly(args, run_dir)
-    else:
-        raise ValueError(f"unsupported scenario: {args.scenario}")
+    try:
+        if args.scenario == "natural_high_heat":
+            run_natural_high_heat(args, run_dir, meta)
+        elif args.scenario == "cooling_anomaly":
+            run_cooling_anomaly(args, run_dir, meta)
+        else:
+            raise ValueError(f"unsupported scenario: {args.scenario}")
+
+        if meta["result"]["status"] == "running":
+            finalize_metadata(meta, status="success", return_code=0)
+        else:
+            finalize_metadata(
+                meta,
+                status=meta["result"]["status"],
+                return_code=meta["result"].get("return_code"),
+            )
+
+    except KeyboardInterrupt:
+        finalize_metadata(meta, status="aborted", return_code=None, notes=["Interrupted by user"])
+        raise
+    except Exception as e:
+        finalize_metadata(meta, status="failed", return_code=1, notes=[str(e)])
+        raise
+    finally:
+        write_metadata(run_dir, meta)
+        print_run_summary(run_dir)
 
 
 if __name__ == "__main__":
