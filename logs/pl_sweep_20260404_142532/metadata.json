@@ -1,0 +1,26 @@
+{
+  "gpu_index": 0,
+  "gpu_name": "NVIDIA GeForce GTX 1080 Ti",
+  "gpu_uuid": "GPU-fd68ea02-5910-abaa-e4af-73fffdd8c14d",
+  "pl_range_w": [
+    125,
+    300
+  ],
+  "default_pl_w": 250,
+  "pls": [
+    150,
+    175,
+    200,
+    225,
+    250,
+    275,
+    300
+  ],
+  "run_seconds": 180,
+  "sample_interval": 1.0,
+  "cooldown_target_c": 48.0,
+  "cooldown_timeout_s": 900,
+  "last_window_seconds": 60,
+  "workload_script": "workload_torch.py",
+  "output_dir": "logs/pl_sweep_20260404_142532"
+}
