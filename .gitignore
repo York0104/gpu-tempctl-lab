@@ -7,6 +7,15 @@ __pycache__/
 .env
 .venv/
 gpu-tempctl-1080ti/
+<<<<<<< HEAD
+
+# generated artifacts
+logs/
+.codex
+timeslice_cycles.csv
+=======
+logs/
+>>>>>>> feat/scenario-platform
 
 # generated artifacts
 logs/
