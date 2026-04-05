@@ -1,27 +1,71 @@
+# =========================
+# Python
+# =========================
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
-*.tmp
-*.swp
-.env
+*.so
+
+# virtual env
 .venv/
+venv/
+env/
 gpu-tempctl-1080ti/
-<<<<<<< HEAD
-logs/
-=======
-<<<<<<< HEAD
 
-# generated artifacts
-logs/
-.codex
-timeslice_cycles.csv
-=======
-logs/
->>>>>>> feat/scenario-platform
+# caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 
-# generated artifacts
+# editors / OS
+*.swp
+*.swo
+*.tmp
+.DS_Store
+Thumbs.db
+
+# =========================
+# Secrets / local env
+# =========================
+.env
+.env.*
+fan_control_lab/env.sh
+
+# optional local configs
+*.local
+
+# =========================
+# Generated logs / experiment outputs
+# =========================
 logs/
-.codex
+fan_control_lab/logs/
+
+# generated csv / summaries
+ctl_*.csv
+gpu_log_*.csv
 timeslice_cycles.csv
->>>>>>> origin/main
+
+# root experimental outputs
+*.log
+
+# figures / generated plots
+*.png
+!fan_control_lab/Figure/
+!fan_control_lab/Figure/*.png
+!/Figure/
+!/Figure/*.png
+
+
+# =========================
+# Tooling
+# =========================
+.codex/
+.codex
+
+# =========================
+# Misc
+# =========================
+*.bak
+*.orig
