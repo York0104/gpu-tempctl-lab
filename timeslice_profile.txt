@@ -1,9 +1,0 @@
-Profile name: timeslice30_openloop
-Calibration target: average GPU utilization ≈ 30%
-Validated platform: NVIDIA GeForce GTX 1080 Ti (icclz1)
-Validated parameters:
-  size = 2560
-  period_ms = 100
-  compute_budget_ms = 27
-Measured result:
-  avg gpu utilization = 29.667%

@@ -23,6 +23,7 @@ from fan_fault_injector import (
     nvml_init as fan_nvml_init,
     nvml_shutdown as fan_nvml_shutdown,
 )
+from workload_profiles import get_workload_profile
 
 
 def run_cmd(cmd):
@@ -319,6 +320,13 @@ def build_metadata_base(args, run_dir: Path):
         meta["requested"] = {
             "scenario": args.scenario,
             "workload_mode": args.workload_mode,
+            "workload_profile": args.workload_profile,
+            "workload_size": args.workload_size,
+            "workload_run_style": args.workload_run_style,
+            "workload_period_ms": args.workload_period_ms,
+            "workload_compute_budget_ms": args.workload_compute_budget_ms,
+            "workload_warmup_seconds": args.workload_warmup_seconds,
+            "workload_cycle_report_every": args.workload_cycle_report_every,
             "power_limit": args.power_limit,
             "run_seconds": args.run_seconds,
             "fault_start": args.fault_start,
@@ -529,6 +537,18 @@ def parse_args():
 
     # cooling_anomaly
     p.add_argument("--workload-mode", choices=["low", "mid", "high"], default="mid")
+    p.add_argument(
+        "--workload-profile",
+        type=str,
+        default=None,
+        help="Named workload profile, e.g. timeslice30_openloop_icclz1",
+    )
+    p.add_argument("--workload-size", type=int, default=None)
+    p.add_argument("--workload-run-style", choices=["continuous", "timeslice"], default=None)
+    p.add_argument("--workload-period-ms", type=float, default=None)
+    p.add_argument("--workload-compute-budget-ms", type=float, default=None)
+    p.add_argument("--workload-warmup-seconds", type=float, default=None)
+    p.add_argument("--workload-cycle-report-every", type=int, default=None)
     p.add_argument("--power-limit", type=int, default=200)
     p.add_argument("--run-seconds", type=int, default=900)
     p.add_argument("--fault-start", type=int, default=300)
@@ -538,6 +558,89 @@ def parse_args():
     p.add_argument("--sample-interval", type=float, default=1.0)
     p.add_argument("--safety-temp", type=float, default=83.0)
     return p.parse_args()
+
+
+def resolve_workload_config(args) -> dict:
+    if args.workload_profile:
+        profile = get_workload_profile(args.workload_profile)
+        profile_args = profile.get("args", {})
+        workload_cfg = {
+            "profile_name": args.workload_profile,
+            "profile_type": profile.get("profile_type"),
+            "validated_on": profile.get("validated_on"),
+            "validation": profile.get("validation"),
+            "mode": profile_args.get("mode"),
+            "run_style": profile_args.get("run_style", "continuous"),
+            "size": profile_args.get("size"),
+            "period_ms": profile_args.get("period_ms"),
+            "compute_budget_ms": profile_args.get("compute_budget_ms"),
+            "warmup_seconds": profile_args.get("warmup_seconds"),
+            "cycle_report_every": profile_args.get("cycle_report_every"),
+        }
+    else:
+        workload_cfg = {
+            "profile_name": None,
+            "profile_type": "adhoc",
+            "validated_on": None,
+            "validation": None,
+            "mode": args.workload_mode,
+            "run_style": "continuous",
+            "size": None,
+            "period_ms": None,
+            "compute_budget_ms": None,
+            "warmup_seconds": None,
+            "cycle_report_every": None,
+        }
+
+    cli_overrides = {
+        "run_style": args.workload_run_style,
+        "size": args.workload_size,
+        "period_ms": args.workload_period_ms,
+        "compute_budget_ms": args.workload_compute_budget_ms,
+        "warmup_seconds": args.workload_warmup_seconds,
+        "cycle_report_every": args.workload_cycle_report_every,
+    }
+    for key, value in cli_overrides.items():
+        if value is not None:
+            workload_cfg[key] = value
+
+    run_style = workload_cfg.get("run_style")
+    if run_style not in {"continuous", "timeslice"}:
+        raise ValueError(f"unsupported workload run_style: {run_style}")
+
+    if run_style == "continuous":
+        if not workload_cfg.get("mode"):
+            workload_cfg["mode"] = args.workload_mode
+        workload_cfg["size"] = None
+        workload_cfg["period_ms"] = None
+        workload_cfg["compute_budget_ms"] = None
+        workload_cfg["warmup_seconds"] = None
+        workload_cfg["cycle_report_every"] = None
+    else:
+        workload_cfg["mode"] = None
+        required_fields = [
+            "size",
+            "period_ms",
+            "compute_budget_ms",
+            "warmup_seconds",
+            "cycle_report_every",
+        ]
+        missing = [k for k in required_fields if workload_cfg.get(k) is None]
+        if missing:
+            raise ValueError(
+                "timeslice workload config is missing required fields: "
+                + ", ".join(missing)
+            )
+        if workload_cfg["period_ms"] <= 0:
+            raise ValueError("timeslice workload period_ms must be > 0")
+        if workload_cfg["compute_budget_ms"] < 0:
+            raise ValueError("timeslice workload compute_budget_ms must be >= 0")
+        if workload_cfg["warmup_seconds"] < 0:
+            raise ValueError("timeslice workload warmup_seconds must be >= 0")
+        if workload_cfg["cycle_report_every"] <= 0:
+            raise ValueError("timeslice workload cycle_report_every must be > 0")
+
+    return workload_cfg
 
 
 def run_natural_high_heat(args, run_dir: Path, meta: dict):
@@ -663,11 +766,20 @@ def run_cooling_anomaly(args, run_dir: Path, meta: dict):
     thermal_csv = run_dir / "thermal.csv"
     perf_csv = run_dir / "perf.csv"
     events_csv = run_dir / "events.csv"
+    timeslice_cycles_csv = run_dir / "timeslice_cycles.csv"
     fault_flag_file = run_dir / "fault_active.flag"
     fault_flag_file.write_text("0")
+    workload_cfg = resolve_workload_config(args)
 
     meta["effective"]["fault_plan"] = {
-        "workload_mode": args.workload_mode,
+        "workload_profile": workload_cfg.get("profile_name"),
+        "workload_mode": workload_cfg.get("mode"),
+        "workload_run_style": workload_cfg.get("run_style"),
+        "workload_size": workload_cfg.get("size"),
+        "workload_period_ms": workload_cfg.get("period_ms"),
+        "workload_compute_budget_ms": workload_cfg.get("compute_budget_ms"),
+        "workload_warmup_seconds": workload_cfg.get("warmup_seconds"),
+        "workload_cycle_report_every": workload_cfg.get("cycle_report_every"),
         "power_limit": args.power_limit,
         "run_seconds": args.run_seconds,
         "fault_start": args.fault_start,
@@ -676,12 +788,15 @@ def run_cooling_anomaly(args, run_dir: Path, meta: dict):
         "fan_index": args.fan_index,
         "safety_temp": args.safety_temp,
     }
+    meta["effective"]["workload"] = workload_cfg
     meta["artifacts"]["thermal_csv"] = str(thermal_csv)
     meta["artifacts"]["perf_csv"] = str(perf_csv)
     meta["artifacts"]["events_csv"] = str(events_csv)
     meta["artifacts"]["fault_flag_file"] = str(fault_flag_file)
     meta["artifacts"]["workload_stdout_log"] = str(run_dir / "workload_stdout.log")
     meta["artifacts"]["logger_stdout_log"] = str(run_dir / "logger_stdout.log")
+    if workload_cfg["run_style"] == "timeslice":
+        meta["artifacts"]["timeslice_cycles_csv"] = str(timeslice_cycles_csv)
     write_metadata(run_dir, meta)
 
     nvmlInit()
@@ -705,20 +820,38 @@ def run_cooling_anomaly(args, run_dir: Path, meta: dict):
             write_event(writer, start_ts, "power_limit_set", args.power_limit)
             f.flush()
 
-            workload_cmd = [
-                sys.executable,
-                args.workload_script,
-                "--mode", args.workload_mode,
+            workload_cmd = [sys.executable, args.workload_script]
+            if workload_cfg["run_style"] == "continuous":
+                workload_cmd.extend([
+                    "--mode", workload_cfg["mode"],
+                    "--run-style", "continuous",
+                ])
+            else:
+                workload_cmd.extend([
+                    "--size", str(workload_cfg["size"]),
+                    "--run-style", "timeslice",
+                    "--period-ms", str(workload_cfg["period_ms"]),
+                    "--compute-budget-ms", str(workload_cfg["compute_budget_ms"]),
+                    "--warmup-seconds", str(workload_cfg["warmup_seconds"]),
+                    "--cycle-report-every", str(workload_cfg["cycle_report_every"]),
+                    "--timeslice-cycles-csv", str(timeslice_cycles_csv),
+                ])
+            workload_cmd.extend([
                 "--perf-csv", str(perf_csv),
                 "--scenario", args.scenario,
                 "--fault-flag-file", str(fault_flag_file),
-            ]
+            ])
             workload_proc, workload_stdout = start_proc(
                 workload_cmd,
                 cwd=Path.cwd(),
                 stdout_path=run_dir / "workload_stdout.log",
             )
-            write_event(writer, start_ts, "workload_start", args.workload_mode)
+            write_event(
+                writer,
+                start_ts,
+                "workload_start",
+                workload_cfg.get("profile_name") or workload_cfg["run_style"],
+            )
             f.flush()
 
             logger_cmd = [
