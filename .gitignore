@@ -7,3 +7,8 @@ __pycache__/
 .env
 .venv/
 gpu-tempctl-1080ti/
+
+# generated artifacts
+logs/
+.codex
+timeslice_cycles.csv
