@@ -33,16 +33,27 @@ which -a cctv
 '''
 
 '''
+cd ~/gpu-tempctl-lab
+source ../gpu-tempctl-1080ti/bin/activate
+source fan_control_lab/env.sh
+source "$HOME/.cargo/env"
+
+export CCTV_DAEMON_PASSWORD='nctuiiot'
+export MPLCONFIGDIR="$HOME/.config/matplotlib"
+mkdir -p "$MPLCONFIGDIR"
+
 python fan_control_lab/gpu_supervisor_80.py \
-  --tag sup80_fault5_v2 \
-  --target 80 \
-  --band 5 \
+  --tag sup70_run600 \
+  --target 70 \
+  --band 3 \
+  --crit-temp 95 \
   --seconds 300 \
   --min-dwell-seconds 15 \
   --size 4096 \
   --duty 1.0 \
   --period-ms 100 \
   --initial-mode GPU_FAULT_5
+
 '''
 
 
@@ -169,24 +180,33 @@ def gpu_state(temp, target, band):
     return "within_band"
 
 
-def choose_mode(temp, current_mode):
+def choose_mode(temp, current_mode, target, band, crit_temp):
     if temp is None:
         return current_mode, "no_data_hold"
 
-    if temp >= 90:
+    lower = target - band
+    upper = target + band
+
+    if temp >= crit_temp:
         return "GPU_Cool_Max", "crit_temp"
 
-    if temp < 50:
+    if temp < target - 30:
         return "GPU_FAULT_5", "preheat"
-    elif temp < 65:
+    elif temp < target - 15:
         return "GPU_FAULT_15", "too_cold"
-    elif temp < 75:
+    elif temp < lower:
         return "GPU_FAULT_20", "warming"
-    elif temp < 79:
+    elif temp < target - 1:
         return "GPU_FAULT_25", "fine_warming"
-    elif temp <= 83:
+    elif temp <= upper:
+        if current_mode == "GPU_Cool_Max":
+            return "GPU_BASELINE", "cool_release"
+
+        if current_mode == "GPU_BASELINE" and temp <= target:
+            return "GPU_FAULT_25", "reenter_hold"
+
         return current_mode, "hold_zone"
-    elif temp <= 85:
+    elif temp <= upper + 1:
         return "GPU_BASELINE", "cooling"
     else:
         return "GPU_Cool_Max", "strong_cooling"
@@ -288,6 +308,7 @@ def main():
     ap.add_argument("--tag", default="gpu_supervisor_80")
     ap.add_argument("--target", type=float, default=80.0)
     ap.add_argument("--band", type=float, default=5.0)
+    ap.add_argument("--crit-temp", type=float, default=95.0)
     ap.add_argument("--seconds", type=int, default=900)
     ap.add_argument("--sample-interval", type=float, default=1.0)
     ap.add_argument("--min-dwell-seconds", type=int, default=12)
@@ -309,6 +330,7 @@ def main():
         "started_at": ts,
         "target": args.target,
         "band": args.band,
+        "crit_temp": args.crit_temp,
         "seconds": args.seconds,
         "sample_interval": args.sample_interval,
         "min_dwell_seconds": args.min_dwell_seconds,
@@ -360,7 +382,13 @@ def main():
             g = read_gpu_metrics()
             temp = g["gpu_temp_c"]
 
-            desired_mode, reason = choose_mode(temp, current_mode)
+            desired_mode, reason = choose_mode(
+                temp,
+                current_mode,
+                args.target,
+                args.band,
+                args.crit_temp,
+            )
             since_switch = now - last_switch_ts
 
             infeasible = ""
